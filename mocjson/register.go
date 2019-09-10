@@ -2,10 +2,8 @@
 package mocjson
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,43 +81,9 @@ var (
 	// These fields are used to map the registered types to method names.
 	registerLock         sync.RWMutex
 	methodToConcreteType = make(map[string]reflect.Type)
-	methodToInfo         = make(map[string]methodInfo)
 	concreteTypeToMethod = make(map[reflect.Type]string)
 )
 
-// baseKindString returns the base kind for a given reflect.Type after
-// indirecting through all pointers.
-func baseKindString(rt reflect.Type) string {
-	numIndirects := 0
-	for rt.Kind() == reflect.Ptr {
-		numIndirects++
-		rt = rt.Elem()
-	}
-
-	return fmt.Sprintf("%s%s", strings.Repeat("*", numIndirects), rt.Kind())
-}
-
-// isAcceptableKind returns whether or not the passed field type is a supported
-// type.  It is called after the first pointer indirection, so further pointers
-// are not supported.
-func isAcceptableKind(kind reflect.Kind) bool {
-	switch kind {
-	case reflect.Chan:
-		fallthrough
-	case reflect.Complex64:
-		fallthrough
-	case reflect.Complex128:
-		fallthrough
-	case reflect.Func:
-		fallthrough
-	case reflect.Ptr:
-		fallthrough
-	case reflect.Interface:
-		return false
-	}
-
-	return true
-}
 
 // RegisterCmd registers a new command that will automatically marshal to and
 // from JSON-RPC with full type checking and positional parameter support.  It
@@ -180,85 +144,10 @@ func RegisterCmd(method string, cmd interface{}, flags UsageFlag) error {
 		return makeError(ErrInvalidType, str)
 	}
 
-	// Enumerate the struct fields to validate them and gather parameter
-	// information.
-	numFields := rt.NumField()
-	numOptFields := 0
-	defaults := make(map[int]reflect.Value)
-	for i := 0; i < numFields; i++ {
-		rtf := rt.Field(i)
-		if rtf.Anonymous {
-			str := fmt.Sprintf("embedded fields are not supported "+
-				"(field name: %q)", rtf.Name)
-			return makeError(ErrEmbeddedType, str)
-		}
-		if rtf.PkgPath != "" {
-			str := fmt.Sprintf("unexported fields are not supported "+
-				"(field name: %q)", rtf.Name)
-			return makeError(ErrUnexportedField, str)
-		}
-
-		// Disallow types that can't be JSON encoded.  Also, determine
-		// if the field is optional based on it being a pointer.
-		var isOptional bool
-		switch kind := rtf.Type.Kind(); kind {
-		case reflect.Ptr:
-			isOptional = true
-			kind = rtf.Type.Elem().Kind()
-			fallthrough
-		default:
-			if !isAcceptableKind(kind) {
-				str := fmt.Sprintf("unsupported field type "+
-					"'%s (%s)' (field name %q)", rtf.Type,
-					baseKindString(rtf.Type), rtf.Name)
-				return makeError(ErrUnsupportedFieldType, str)
-			}
-		}
-
-		// Count the optional fields and ensure all fields after the
-		// first optional field are also optional.
-		if isOptional {
-			numOptFields++
-		} else {
-			if numOptFields > 0 {
-				str := fmt.Sprintf("all fields after the first "+
-					"optional field must also be optional "+
-					"(field name %q)", rtf.Name)
-				return makeError(ErrNonOptionalField, str)
-			}
-		}
-
-		// Ensure the default value can be unsmarshalled into the type
-		// and that defaults are only specified for optional fields.
-		if tag := rtf.Tag.Get("jsonrpcdefault"); tag != "" {
-			if !isOptional {
-				str := fmt.Sprintf("required fields must not "+
-					"have a default specified (field name "+
-					"%q)", rtf.Name)
-				return makeError(ErrNonOptionalDefault, str)
-			}
-
-			rvf := reflect.New(rtf.Type.Elem())
-			err := json.Unmarshal([]byte(tag), rvf.Interface())
-			if err != nil {
-				str := fmt.Sprintf("default value of %q is "+
-					"the wrong type (field name %q)", tag,
-					rtf.Name)
-				return makeError(ErrMismatchedDefault, str)
-			}
-			defaults[i] = rvf
-		}
-	}
 
 	// Update the registration maps.
 	methodToConcreteType[method] = rtp
-	methodToInfo[method] = methodInfo{
-		maxParams:    numFields,
-		numReqParams: numFields - numOptFields,
-		numOptParams: numOptFields,
-		defaults:     defaults,
-		flags:        flags,
-	}
+
 	concreteTypeToMethod[rtp] = method
 	return nil
 }
@@ -271,19 +160,4 @@ func MustRegisterCmd(method string, cmd interface{}, flags UsageFlag) {
 		panic(fmt.Sprintf("failed to register type %q: %v\n", method,
 			err))
 	}
-}
-
-// RegisteredCmdMethods returns a sorted list of methods for all registered
-// commands.
-func RegisteredCmdMethods() []string {
-	registerLock.Lock()
-	defer registerLock.Unlock()
-
-	methods := make([]string, 0, len(methodToInfo))
-	for k := range methodToInfo {
-		methods = append(methods, k)
-	}
-
-	sort.Sort(sort.StringSlice(methods))
-	return methods
 }
